@@ -1,5 +1,6 @@
 import json
 import time
+import random
 from datetime import datetime
 from github import Github
 from tqdm import tqdm
@@ -10,12 +11,16 @@ GITHUB_TOKEN = "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"
 
 TARGET_DATE = "2025-08-01"  # 截止日期
 TARGET_LANG = "python"      # 目标语言
-MIN_STARS = 10              # 最小 Star 数
+MIN_STARS = 50              # 最小 Star 数
 MAX_STARS = 200             # 最大 Star 数
 MIN_LINES = 50              # 最小行数
 MAX_LINES = 120             # 最大行数
-LIMIT = 2                   # 抓取数量 (测试用)
+LIMIT = 10                  # 抓取数量
 OUTPUT_FILE = "dataset_fresh_2025.json"
+
+# 随机化设置
+ENABLE_RANDOM = True        # 是否启用随机化
+RANDOM_POOL_SIZE = 50       # 从前 N 个结果中随机抽取
 # =========================================================
 
 def fetch_fresh_code():
@@ -27,18 +32,56 @@ def fetch_fresh_code():
     print(f"📅 Filter: Created > {TARGET_DATE} | Lines: {MIN_LINES}-{MAX_LINES} | Limit: {LIMIT}")
     
     g = Github(GITHUB_TOKEN)
-    query = f"language:{TARGET_LANG} created:>{TARGET_DATE} stars:{MIN_STARS}..{MAX_STARS}"
+    
+    # 随机化查询参数
+    if ENABLE_RANDOM:
+        # 随机选择排序方式和顺序
+        sort_options = ["stars", "forks", "updated"]
+        order_options = ["desc", "asc"]
+        sort_by = random.choice(sort_options)
+        order_by = random.choice(order_options)
+        
+        # 随机偏移星星范围 (在 MIN_STARS~MAX_STARS 基础上随机偏移)
+        star_offset = random.randint(0, 50)
+        actual_min_stars = MIN_STARS + star_offset
+        actual_max_stars = MAX_STARS + star_offset
+        
+        print(f"🎲 Random mode: sort={sort_by}, order={order_by}, stars={actual_min_stars}..{actual_max_stars}")
+    else:
+        sort_by = "stars"
+        order_by = "desc"
+        actual_min_stars = MIN_STARS
+        actual_max_stars = MAX_STARS
+    
+    query = f"language:{TARGET_LANG} created:>{TARGET_DATE} stars:{actual_min_stars}..{actual_max_stars}"
     
     try:
-        repos = g.search_repositories(query, sort="stars", order="desc")
+        repos = g.search_repositories(query, sort=sort_by, order=order_by)
     except Exception as e:
         print(f"❌ GitHub API Error: {e}")
         return []
 
+    # 收集候选仓库（先收集一个池子，再随机抽取）
+    candidate_repos = []
+    repo_count = 0
+    
+    print(f"📦 Building candidate pool (max {RANDOM_POOL_SIZE} repos)...")
+    for repo in repos:
+        if repo_count >= RANDOM_POOL_SIZE:
+            break
+        candidate_repos.append(repo)
+        repo_count += 1
+        time.sleep(0.05)  # 避免 API 限制
+    
+    # 随机打乱候选仓库顺序
+    if ENABLE_RANDOM:
+        random.shuffle(candidate_repos)
+        print(f"🔀 Shuffled {len(candidate_repos)} candidate repos")
+
     dataset = []
     pbar = tqdm(total=LIMIT, desc="Mining Code")
 
-    for repo in repos:
+    for repo in candidate_repos:
         if len(dataset) >= LIMIT:
             break
         try:
@@ -75,10 +118,6 @@ def fetch_fresh_code():
 
     pbar.close()
     
-    # 保存文件
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        json.dump(dataset, f, indent=2, ensure_ascii=False)
-        
     print(f"✅ [Module 1] Completed. Saved {len(dataset)} items to {OUTPUT_FILE}")
     return dataset
 

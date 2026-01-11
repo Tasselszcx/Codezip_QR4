@@ -366,6 +366,329 @@ def _compute_token_bleu(reference: str, hypothesis: str) -> float:
     return bp * bleu
 
 
+def _compute_wer(reference: str, hypothesis: str) -> float:
+    """
+    计算词错误率 (Word Error Rate)
+    WER = (S + D + I) / N，以词为单位
+    """
+    ref_words = reference.split()
+    hyp_words = hypothesis.split()
+    n = len(ref_words)
+    m = len(hyp_words)
+
+    if n == 0:
+        return 1.0 if m > 0 else 0.0
+
+    # DP 矩阵
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(n + 1):
+        dp[i][0] = i
+    for j in range(m + 1):
+        dp[0][j] = j
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = 0 if ref_words[i - 1] == hyp_words[j - 1] else 1
+            dp[i][j] = min(
+                dp[i - 1][j] + 1,      # deletion
+                dp[i][j - 1] + 1,      # insertion
+                dp[i - 1][j - 1] + cost  # substitution
+            )
+
+    edit_distance = dp[n][m]
+    return edit_distance / n
+
+
+def _compute_exact_match_rate(reference: str, hypothesis: str) -> float:
+    """
+    计算精确匹配率 (Exact Match Rate)
+    完全匹配的行数 / 总行数
+    """
+    ref_lines = reference.split('\n')
+    hyp_lines = hypothesis.split('\n')
+    
+    if len(ref_lines) == 0:
+        return 1.0 if len(hyp_lines) == 0 else 0.0
+    
+    # 对齐比较：取两者中较短的长度
+    matched = 0
+    for i, ref_line in enumerate(ref_lines):
+        if i < len(hyp_lines) and ref_line == hyp_lines[i]:
+            matched += 1
+    
+    return matched / len(ref_lines)
+
+
+# ============================================================
+# 🏷️ 八大错误谱系检测函数（基于规则，不依赖 LLM）
+# ============================================================
+
+def _detect_visual_typo(reference: str, hypothesis: str) -> int:
+    """
+    检测形近字混淆 (1 vs l, 0 vs O, etc.)
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    # 形近字对（双向检测）
+    confusable_pairs = [
+        ('1', 'l'), ('1', 'I'), ('l', 'I'),  # 1/l/I
+        ('0', 'O'), ('0', 'o'), ('O', 'o'),  # 0/O/o
+        ('5', 'S'), ('5', 's'),              # 5/S
+        ('8', 'B'),                          # 8/B
+        ('2', 'Z'), ('2', 'z'),              # 2/Z
+        ('6', 'G'),                          # 6/G
+        ('rn', 'm'),                         # rn/m (连字)
+        ("'", '`'), ('"', "''"),             # 引号混淆
+    ]
+    
+    ref_lower = reference.lower()
+    hyp_lower = hypothesis.lower()
+    
+    for a, b in confusable_pairs:
+        # 检查是否发生了替换：ref 中有 a，hyp 中对应位置变成了 b
+        ref_count_a = reference.count(a)
+        hyp_count_a = hypothesis.count(a)
+        ref_count_b = reference.count(b)
+        hyp_count_b = hypothesis.count(b)
+        
+        # 如果 a 在 ref 中更多，但 b 在 hyp 中更多，可能发生了混淆
+        if ref_count_a > hyp_count_a and hyp_count_b > ref_count_b:
+            return 1
+        if ref_count_b > hyp_count_b and hyp_count_a > ref_count_a:
+            return 1
+    
+    return 0
+
+
+def _detect_symbol_loss(reference: str, hypothesis: str) -> int:
+    """
+    检测符号丢失 (_, :, ;, 括号等)
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    critical_symbols = ['_', ':', ';', '(', ')', '[', ']', '{', '}', ',', '.', '=', '+', '-', '*', '/']
+    
+    for sym in critical_symbols:
+        ref_count = reference.count(sym)
+        hyp_count = hypothesis.count(sym)
+        
+        # 如果 ref 中的符号比 hyp 中多 20% 以上，认为发生了丢失
+        if ref_count > 0 and hyp_count < ref_count * 0.8:
+            return 1
+    
+    return 0
+
+
+def _detect_indentation_error(reference: str, hypothesis: str) -> int:
+    """
+    检测缩进错误
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    ref_lines = reference.split('\n')
+    hyp_lines = hypothesis.split('\n')
+    
+    # 计算每行开头的空格数
+    def get_indent(line):
+        return len(line) - len(line.lstrip(' \t'))
+    
+    # 取两者较短的长度进行比较
+    min_len = min(len(ref_lines), len(hyp_lines))
+    
+    indent_errors = 0
+    for i in range(min_len):
+        ref_indent = get_indent(ref_lines[i])
+        hyp_indent = get_indent(hyp_lines[i])
+        
+        # 如果缩进差异超过 2 个空格，认为是错误
+        if abs(ref_indent - hyp_indent) >= 2:
+            indent_errors += 1
+    
+    # 如果超过 5% 的行有缩进错误，标记为 1
+    if min_len > 0 and indent_errors / min_len > 0.05:
+        return 1
+    
+    return 0
+
+
+def _detect_line_skipped(reference: str, hypothesis: str) -> int:
+    """
+    检测整行丢失
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    ref_lines = [line.strip() for line in reference.split('\n') if line.strip()]
+    hyp_lines = [line.strip() for line in hypothesis.split('\n') if line.strip()]
+    
+    # 如果 hyp 的行数少于 ref 的 90%，认为发生了行丢失
+    if len(hyp_lines) < len(ref_lines) * 0.9:
+        return 1
+    
+    # 检查是否有 ref 中的行完全不在 hyp 中
+    hyp_set = set(hyp_lines)
+    missing_lines = 0
+    for line in ref_lines:
+        if len(line) > 10 and line not in hyp_set:  # 只检查有意义的行
+            missing_lines += 1
+    
+    # 如果超过 10% 的有意义行丢失，标记为 1
+    if len(ref_lines) > 0 and missing_lines / len(ref_lines) > 0.1:
+        return 1
+    
+    return 0
+
+
+def _detect_variable_hallucination(reference: str, hypothesis: str) -> int:
+    """
+    检测变量名幻觉（OCR 中出现了 reference 中不存在的标识符）
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    import re
+    
+    # 提取标识符（变量名、函数名等）
+    def extract_identifiers(code):
+        # 匹配 Python 标识符
+        identifiers = set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', code))
+        # 排除 Python 关键字和常见内置函数
+        keywords = {'def', 'class', 'if', 'else', 'elif', 'for', 'while', 'return', 
+                   'import', 'from', 'as', 'try', 'except', 'finally', 'with', 
+                   'True', 'False', 'None', 'and', 'or', 'not', 'in', 'is',
+                   'print', 'len', 'range', 'str', 'int', 'float', 'list', 'dict',
+                   'self', 'cls', 'args', 'kwargs'}
+        return identifiers - keywords
+    
+    ref_ids = extract_identifiers(reference)
+    hyp_ids = extract_identifiers(hypothesis)
+    
+    # 找出 hyp 中有但 ref 中没有的标识符（幻觉）
+    hallucinated = hyp_ids - ref_ids
+    
+    # 过滤掉长度小于 3 的（可能是误判）
+    hallucinated = {h for h in hallucinated if len(h) >= 3}
+    
+    # 如果有超过 3 个幻觉标识符，标记为 1
+    if len(hallucinated) >= 3:
+        return 1
+    
+    return 0
+
+
+def _detect_code_invention(reference: str, hypothesis: str) -> int:
+    """
+    检测代码捏造（OCR 中出现了完全不存在的代码段）
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    hyp_lines = [line.strip() for line in hypothesis.split('\n') if line.strip()]
+    
+    invented_lines = 0
+    for line in hyp_lines:
+        # 只检查有意义的行（长度 > 15）
+        if len(line) > 15:
+            # 如果这行在 reference 中完全找不到任何相似片段
+            if line not in reference and line[:20] not in reference:
+                invented_lines += 1
+    
+    # 如果有超过 5% 的行是捏造的，标记为 1
+    if len(hyp_lines) > 0 and invented_lines / len(hyp_lines) > 0.05:
+        return 1
+    
+    return 0
+
+
+def _detect_repetition(reference: str, hypothesis: str) -> int:
+    """
+    检测重复输出（复读机现象）
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    hyp_lines = [line for line in hypothesis.split('\n') if line.strip()]
+    
+    if len(hyp_lines) < 3:
+        return 0
+    
+    # 检测连续重复的行
+    consecutive_repeats = 0
+    for i in range(1, len(hyp_lines)):
+        if hyp_lines[i] == hyp_lines[i-1] and len(hyp_lines[i].strip()) > 5:
+            consecutive_repeats += 1
+    
+    # 如果有 2 行以上连续重复，标记为 1
+    if consecutive_repeats >= 2:
+        return 1
+    
+    # 检测非连续的大量重复
+    from collections import Counter
+    line_counts = Counter(line for line in hyp_lines if len(line.strip()) > 10)
+    
+    # 如果有任何行重复超过 3 次，标记为 1
+    for line, count in line_counts.items():
+        if count >= 3:
+            return 1
+    
+    return 0
+
+
+def _detect_comment_loss(reference: str, hypothesis: str) -> int:
+    """
+    检测注释丢失或乱码
+    返回: 1 = 检测到, 0 = 未检测到
+    """
+    # 提取注释行
+    def extract_comments(code):
+        comments = []
+        for line in code.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('#'):
+                comments.append(stripped)
+            # 也检测行内注释
+            if '#' in line:
+                comment_part = line.split('#', 1)[1].strip()
+                if comment_part:
+                    comments.append('#' + comment_part)
+        return comments
+    
+    ref_comments = extract_comments(reference)
+    hyp_comments = extract_comments(hypothesis)
+    
+    if not ref_comments:
+        return 0  # 原代码没有注释
+    
+    # 检查注释数量是否大幅减少
+    if len(hyp_comments) < len(ref_comments) * 0.7:
+        return 1
+    
+    # 检查注释内容是否严重变形
+    matched = 0
+    for ref_c in ref_comments:
+        for hyp_c in hyp_comments:
+            # 简单的相似度检测
+            if ref_c in hyp_c or hyp_c in ref_c:
+                matched += 1
+                break
+            # 或者超过 70% 的字符匹配
+            common_chars = sum(1 for c in ref_c if c in hyp_c)
+            if len(ref_c) > 0 and common_chars / len(ref_c) > 0.7:
+                matched += 1
+                break
+    
+    # 如果少于 70% 的注释被正确保留，标记为 1
+    if len(ref_comments) > 0 and matched / len(ref_comments) < 0.7:
+        return 1
+    
+    return 0
+
+
+def _detect_all_taxonomy_errors(reference: str, hypothesis: str) -> dict:
+    """
+    检测所有八大错误谱系，返回 0/1 标签字典
+    """
+    return {
+        "Visual_Typo": _detect_visual_typo(reference, hypothesis),
+        "Symbol_Loss": _detect_symbol_loss(reference, hypothesis),
+        "Indentation_Error": _detect_indentation_error(reference, hypothesis),
+        "Line_Skipped": _detect_line_skipped(reference, hypothesis),
+        "Variable_Hallucination": _detect_variable_hallucination(reference, hypothesis),
+        "Code_Invention": _detect_code_invention(reference, hypothesis),
+        "Repetition": _detect_repetition(reference, hypothesis),
+        "Comment_Loss": _detect_comment_loss(reference, hypothesis),
+    }
+
+
 def _call_llm_for_taxonomy(client, reference: str, hypothesis: str) -> list:
     """
     调用 LLM 进行错误分类
@@ -447,61 +770,88 @@ def run_module_4_judge(output_dir: str):
             if line.strip():
                 ocr_results.append(json.loads(line))
 
-    # 初始化 OpenAI 客户端 (用于 taxonomy)
-    api_key = os.environ.get("AIHUBMIX_API_KEY") or _try_load_api_key_from_env_files()
-    client = None
-    if api_key and OpenAI:
-        client = OpenAI(api_key=api_key, base_url=AIHUBMIX_BASE_URL)
+    # 🌟 核心修复：按 (code_id, ratio) 分组，合并多页结果
+    from collections import defaultdict
+    grouped = defaultdict(list)  # (code_id, ratio) -> [{"text": ..., "image_path": ...}, ...]
+    
+    for rec in ocr_results:
+        # 提取 code_id
+        img_path = rec.get("image_path", "")
+        parts = img_path.replace("\\", "/").split("/")
+        code_id = parts[-3] if len(parts) >= 3 else rec.get("code_id", "")
+        
+        ratio = rec.get("ratio", 1)
+        ocr_text = rec.get("text", "")
+        
+        # 跳过错误结果
+        if not ocr_text or "error" in rec:
+            continue
+        
+        # 清理特殊标记（关键！）
+        ocr_text = ocr_text.replace('<|begin_of_box|>', '').replace('<|end_of_box|>', '').strip()
+        
+        # 按 (code_id, ratio) 分组
+        grouped[(code_id, ratio)].append({
+            "text": ocr_text,
+            "image_path": img_path,
+        })
 
     # 评估结果
     detail_path = os.path.join(output_dir, "judge_results_detail.jsonl")
     summary_path = os.path.join(output_dir, "judge_summary.json")
 
     # 按 ratio 分组统计
-    stats_by_ratio = {r: {"cer_sum": 0, "bleu_sum": 0, "ast_pass": 0, "count": 0, "errors": Counter()} 
-                      for r in TARGET_RATIOS}
+    stats_by_ratio = {r: {
+        "cer_sum": 0, "wer_sum": 0, "bleu_sum": 0, 
+        "exact_match_sum": 0,
+        "ast_pass": 0, "count": 0, 
+        "errors": Counter(), "taxonomy_sums": Counter()
+    } for r in TARGET_RATIOS}
 
     # 清空 detail 文件
     open(detail_path, "w").close()
 
-    total = len(ocr_results)
-    for idx, rec in enumerate(ocr_results):
-        ratio = rec.get("ratio", 1)
-        ocr_text = rec.get("text", "")
-
-        # 从 image_path 重新提取正确的 code_id
-        # 路径结构: images/{code_id}/{variant_folder}/page_xxx.png
-        img_path = rec.get("image_path", "")
-        parts = img_path.replace("\\", "/").split("/")
-        code_id = parts[-3] if len(parts) >= 3 else rec.get("code_id", "")
-
-        if not ocr_text or "error" in rec:
-            continue
-
+    total = len(grouped)
+    evaluated = 0
+    
+    # 🌟 现在按 (code_id, ratio) 组合进行评估
+    for idx, ((code_id, ratio), pages) in enumerate(grouped.items(), 1):
         reference = code_map.get(code_id, "")
         if not reference:
+            print(f"[{idx}/{total}] ⚠️ No ground truth for {code_id}, skipping")
             continue
 
-        print(f"[{idx + 1}/{total}] Evaluating: {code_id} @ ratio {ratio}")
+        # 🌟 合并多页 OCR 结果（按文件名排序确保顺序正确）
+        pages.sort(key=lambda x: x["image_path"])
+        merged_ocr = '\n'.join([p["text"] for p in pages])
+        
+        evaluated += 1
+        num_pages = len(pages)
+        print(f"[{idx}/{total}] Evaluating: {code_id} @ ratio {ratio}x ({num_pages} pages)")
 
         # 1. Hard metrics
-        cer = _compute_cer(reference, ocr_text)
-        ast_ok = _check_ast_parsable(ocr_text)
-        bleu = _compute_token_bleu(reference, ocr_text)
+        cer = _compute_cer(reference, merged_ocr)
+        wer = _compute_wer(reference, merged_ocr)
+        bleu = _compute_token_bleu(reference, merged_ocr)
+        exact_match = _compute_exact_match_rate(reference, merged_ocr)
+        ast_ok = _check_ast_parsable(merged_ocr)
 
-        # 2. Soft taxonomy (LLM)
-        error_types = []
-        if client:
-            error_types = _call_llm_for_taxonomy(client, reference, ocr_text)
+        # 2. Soft taxonomy
+        taxonomy_labels = _detect_all_taxonomy_errors(reference, merged_ocr)
+        detected_error_types = [k for k, v in taxonomy_labels.items() if v == 1]
 
         # 记录详情
         detail_rec = {
             "code_id": code_id,
             "ratio": ratio,
+            "num_pages": num_pages,
             "cer": round(cer, 4),
-            "ast_parsable": ast_ok,
+            "wer": round(wer, 4),
             "token_bleu": round(bleu, 4),
-            "error_types": error_types
+            "exact_match_rate": round(exact_match, 4),
+            "ast_parsable": ast_ok,
+            "taxonomy_labels": taxonomy_labels,
+            "detected_errors": detected_error_types,
         }
 
         with open(detail_path, "a", encoding="utf-8") as f:
@@ -510,23 +860,35 @@ def run_module_4_judge(output_dir: str):
         # 更新统计
         if ratio in stats_by_ratio:
             stats_by_ratio[ratio]["cer_sum"] += cer
+            stats_by_ratio[ratio]["wer_sum"] += wer
             stats_by_ratio[ratio]["bleu_sum"] += bleu
-            stats_by_ratio[ratio]["ast_pass"] += int(ast_ok)
+            stats_by_ratio[ratio]["exact_match_sum"] += exact_match
+            stats_by_ratio[ratio]["ast_pass"] += (1 if ast_ok else 0)
             stats_by_ratio[ratio]["count"] += 1
-            for et in error_types:
-                stats_by_ratio[ratio]["errors"][et] += 1
+            
+            # 记录该样本中出现的错误（taxonomy）
+            for err_type, val in taxonomy_labels.items():
+                if val == 1:
+                    stats_by_ratio[ratio]["errors"][err_type] += 1
+                stats_by_ratio[ratio]["taxonomy_sums"][err_type] += val
 
     # 生成汇总
     summary = {}
     for ratio, s in stats_by_ratio.items():
         if s["count"] == 0:
             continue
+        # 计算每种错误类型的检出率
+        error_rates = {et: round(cnt / s["count"], 4) 
+                      for et, cnt in s["errors"].items()}
         summary[f"ratio_{ratio}x"] = {
             "count": s["count"],
             "avg_cer": round(s["cer_sum"] / s["count"], 4),
+            "avg_wer": round(s["wer_sum"] / s["count"], 4),
             "avg_token_bleu": round(s["bleu_sum"] / s["count"], 4),
+            "avg_exact_match_rate": round(s["exact_match_sum"] / s["count"], 4),
             "ast_pass_rate": round(s["ast_pass"] / s["count"], 4),
-            "error_distribution": dict(s["errors"])
+            "error_counts": dict(s["errors"]),  # 原始计数
+            "error_rates": error_rates,  # 检出率
         }
 
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -539,8 +901,15 @@ def run_module_4_judge(output_dir: str):
     # 打印简要汇总
     print("\n📈 Quick Summary:")
     for ratio_key, data in summary.items():
-        print(f"   {ratio_key}: CER={data['avg_cer']:.2%}, BLEU={data['avg_token_bleu']:.4f}, "
-              f"AST Pass={data['ast_pass_rate']:.0%}")
+        print(f"   {ratio_key}:")
+        print(f"      ├─ CER={data['avg_cer']:.2%}, WER={data['avg_wer']:.2%}")
+        print(f"      ├─ BLEU={data['avg_token_bleu']:.4f}, Exact Match={data['avg_exact_match_rate']:.2%}")
+        print(f"      ├─ AST Pass={data['ast_pass_rate']:.0%}")
+        if data['error_counts']:
+            err_str = ", ".join([f"{k}:{v}" for k, v in data['error_counts'].items()])
+            print(f"      └─ Errors: {err_str}")
+        else:
+            print(f"      └─ Errors: (none detected)")
 
 
 def apply_visual_corruption(image_path, ratio):
@@ -632,8 +1001,8 @@ def run_full_process():
                 source_code=source_code,
                 base_output_dir=item_output_dir,
                 width=1024,
-                height=1500,
-                font_size=16, 
+                height=1024,  # 正方形
+                font_size=18,  # 稍微小一点适应正方形
                 line_height=1.2,
                 dpi=100,
                 # 🌟 关键修改：改为 True，保持代码原样换行 🌟
