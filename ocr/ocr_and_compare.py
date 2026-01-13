@@ -1,6 +1,8 @@
 """
 简单的多页 OCR + 合并 + 对比脚本
-用法: python ocr_and_compare.py <图片目录> <code_id>
+用法: 
+  python ocr_and_compare.py <图片目录> <code_id>  # 实时 OCR 模式
+  python ocr_and_compare.py --from-cache <code_id> <ratio>  # 从缓存读取模式
 """
 import os
 import sys
@@ -9,6 +11,91 @@ import glob
 import base64
 import time
 from openai import OpenAI
+import difflib
+import re
+
+
+def normalize_blank_lines(text):
+    """规范化空行：压缩连续空行为单个空行，统一处理头尾空行"""
+    lines = text.splitlines()
+    
+    # 去除头尾空行
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    
+    # 压缩连续空行为单个空行
+    normalized = []
+    prev_blank = False
+    for line in lines:
+        is_blank = not line.strip()
+        if is_blank:
+            if not prev_blank:
+                normalized.append('')
+            prev_blank = True
+        else:
+            normalized.append(line)
+            prev_blank = False
+    
+    return '\n'.join(normalized)
+
+
+def smart_join_pages(ocr_pages):
+    """智能拼接多页 OCR 结果，保留缩进上下文"""
+    if not ocr_pages:
+        return ''
+    
+    if len(ocr_pages) == 1:
+        return ocr_pages[0]
+    
+    result = [ocr_pages[0]]
+    
+    for i in range(1, len(ocr_pages)):
+        prev_page = ocr_pages[i-1]
+        curr_page = ocr_pages[i]
+        
+        if not prev_page.strip() or not curr_page.strip():
+            result.append(curr_page)
+            continue
+        
+        prev_lines = prev_page.splitlines()
+        curr_lines = curr_page.splitlines()
+        
+        # 获取上一页最后一个非空行的缩进
+        prev_last_line = None
+        for line in reversed(prev_lines):
+            if line.strip():
+                prev_last_line = line
+                break
+        
+        # 获取当前页第一个非空行的缩进
+        curr_first_line = None
+        for line in curr_lines:
+            if line.strip():
+                curr_first_line = line
+                break
+        
+        # 检测缩进差异并修正
+        if prev_last_line and curr_first_line:
+            prev_indent = len(prev_last_line) - len(prev_last_line.lstrip())
+            curr_indent = len(curr_first_line) - len(curr_first_line.lstrip())
+            
+            # 如果当前页第一行缩进异常（比上一页少很多），可能是跨页缩进丢失
+            # 这里我们保守处理：只在明显是类/函数延续时才调整
+            indent_diff = prev_indent - curr_indent
+            
+            # 如果上一页最后一行有缩进，而当前页第一行缩进为0，且不是新的顶层定义
+            # 很可能是缩进丢失
+            if (prev_indent >= 4 and curr_indent == 0 and 
+                not curr_first_line.strip().startswith(('def ', 'class ', 'import ', 'from '))):
+                # 可能需要继承上一页的缩进
+                # 但这个启发式可能不准确，所以暂时只记录，不强制修正
+                pass
+        
+        result.append(curr_page)
+    
+    return '\n'.join(result)
 
 
 def load_api_key():
@@ -52,11 +139,11 @@ def ocr_image(image_path, api_key, max_retries=3):
                 temperature=0.0,
                 max_tokens=4096,
                 messages=[
-                    {"role": "system", "content": "You are an OCR engine for code images."},
+                    {"role": "system", "content": "You are an OCR engine for code images. Your output must preserve the exact formatting of the code."},
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": "Transcribe the code exactly. Output plain text only. Preserve all whitespace and indentation."},
+                            {"type": "text", "text": "Transcribe the code EXACTLY as shown in the image. Preserve all blank lines, indentation, and formatting EXACTLY. Do not remove empty lines. Do not modify whitespace. Output only the raw code text without any markdown formatting."},
                             {"type": "image_url", "image_url": {"url": data_url}},
                         ],
                     },
@@ -130,7 +217,213 @@ def calculate_metrics(reference, hypothesis):
     return cer, wer, bleu
 
 
+def load_from_cache(code_id, ratio):
+    """从 glm46v_ocr.jsonl 加载已有的 OCR 结果"""
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    cache_path = os.path.join(script_dir, "..", "experiment_output", "glm46v_ocr.jsonl")
+    
+    if not os.path.exists(cache_path):
+        print(f"[ERROR] Cache file not found: {cache_path}")
+        return None
+    
+    ocr_pages = []
+    with open(cache_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            item = json.loads(line)
+            if item['code_id'] == code_id and item['ratio'] == int(ratio):
+                text = item['text'].replace('<|begin_of_box|>', '').replace('<|end_of_box|>', '').strip()
+                ocr_pages.append(text)
+    
+    if not ocr_pages:
+        return None
+    
+    # 使用智能拼接而不是简单的 join
+    return smart_join_pages(ocr_pages)
+
+
+def print_diff_report(original_code, ocr_text):
+    """打印详细的差异对比报告"""
+    print("\n" + "=" * 80)
+    print("DETAILED DIFF REPORT")
+    print("=" * 80)
+    
+    ref_lines = original_code.splitlines()
+    ocr_lines = ocr_text.splitlines()
+    
+    print(f"\n📊 Lines: Original={len(ref_lines)}, OCR={len(ocr_lines)}")
+    
+    # 使用 difflib 生成差异
+    diff = list(difflib.unified_diff(
+        ref_lines, 
+        ocr_lines, 
+        fromfile='Original', 
+        tofile='OCR',
+        lineterm=''
+    ))
+    
+    if len(diff) <= 2:  # 只有头部信息，没有实际差异
+        print("\n✅ No differences found (line-by-line match)")
+        return
+    
+    print(f"\n❌ Found {len([d for d in diff if d.startswith('-') or d.startswith('+')])} diff lines")
+    print("\n--- Unified Diff ---")
+    for line in diff[:100]:  # 限制输出前100行
+        if line.startswith('-'):
+            print(f"\033[91m{line}\033[0m")  # 红色
+        elif line.startswith('+'):
+            print(f"\033[92m{line}\033[0m")  # 绿色
+        elif line.startswith('@'):
+            print(f"\033[94m{line}\033[0m")  # 蓝色
+        else:
+            print(line)
+    
+    if len(diff) > 100:
+        print(f"\n... (truncated, {len(diff) - 100} more lines)")
+    
+    # 逐行对比并标注差异
+    print("\n--- Line-by-Line Comparison (first 30 mismatches) ---")
+    mismatch_count = 0
+    for i in range(max(len(ref_lines), len(ocr_lines))):
+        if mismatch_count >= 30:
+            print(f"\n... (truncated, more mismatches exist)")
+            break
+        
+        ref = ref_lines[i] if i < len(ref_lines) else ""
+        ocr = ocr_lines[i] if i < len(ocr_lines) else ""
+        
+        if ref.strip() != ocr.strip():
+            mismatch_count += 1
+            print(f"\n🔴 Line {i+1}:")
+            print(f"  REF: {repr(ref)}")
+            print(f"  OCR: {repr(ocr)}")
+            
+            # 字符级差异
+            if ref and ocr:
+                s = difflib.SequenceMatcher(None, ref, ocr)
+                char_diffs = []
+                for tag, i1, i2, j1, j2 in s.get_opcodes():
+                    if tag == 'replace':
+                        char_diffs.append(f"pos {i1}-{i2}: '{ref[i1:i2]}' -> '{ocr[j1:j2]}'")
+                    elif tag == 'delete':
+                        char_diffs.append(f"pos {i1}-{i2}: deleted '{ref[i1:i2]}'")
+                    elif tag == 'insert':
+                        char_diffs.append(f"pos {i1}: inserted '{ocr[j1:j2]}'")
+                if char_diffs:
+                    print(f"  Diff: {'; '.join(char_diffs[:5])}")
+
+
+def main_from_cache(code_id, ratio):
+    """从缓存读取并对比的模式"""
+    print(f"🔄 Loading from cache: {code_id} @ ratio {ratio}x")
+    
+    # Load OCR from cache
+    ocr_text = load_from_cache(code_id, ratio)
+    if ocr_text is None:
+        print(f"[ERROR] No OCR results found for {code_id} @ ratio {ratio}")
+        return
+    
+    print(f"✅ Loaded OCR: {len(ocr_text)} chars, {len(ocr_text.splitlines())} lines")
+    
+    # Load original code
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    dataset_path = os.path.join(script_dir, "..", "experiment_output", "dataset.json")
+    
+    if not os.path.exists(dataset_path):
+        print(f"[ERROR] dataset.json not found at: {dataset_path}")
+        return
+    
+    with open(dataset_path, 'r', encoding='utf-8') as f:
+        dataset = {item['id']: item for item in json.load(f)}
+    
+    if code_id not in dataset:
+        print(f"[ERROR] code_id not found: {code_id}")
+        return
+    
+    original_code = dataset[code_id]['code']
+    print(f"✅ Loaded original: {len(original_code)} chars, {len(original_code.splitlines())} lines")
+    
+    # 规范化空行后再计算指标
+    print(f"\n⏳ Normalizing blank lines...")
+    original_normalized = normalize_blank_lines(original_code)
+    ocr_normalized = normalize_blank_lines(ocr_text)
+    
+    print(f"After normalization:")
+    print(f"  Original: {len(original_normalized)} chars, {len(original_normalized.splitlines())} lines")
+    print(f"  OCR:      {len(ocr_normalized)} chars, {len(ocr_normalized.splitlines())} lines")
+    
+    # Calculate metrics (原始 & 规范化后)
+    print(f"\n⏳ Calculating metrics...")
+    cer_raw, wer_raw, bleu_raw = calculate_metrics(original_code, ocr_text)
+    cer_norm, wer_norm, bleu_norm = calculate_metrics(original_normalized, ocr_normalized)
+    
+    # Output metrics
+    print("\n" + "=" * 80)
+    print("EVALUATION RESULTS")
+    print("=" * 80)
+    print(f"Code ID:                     {code_id}")
+    print(f"Ratio:                       {ratio}x")
+    print(f"\n📊 Raw (before normalization):")
+    print(f"  CER (Character Error Rate):  {cer_raw:.2f}%")
+    print(f"  WER (Word Error Rate):       {wer_raw:.2f}%")
+    print(f"  BLEU Score:                  {bleu_raw:.2f}")
+    print(f"\n✨ Normalized (after blank line normalization):")
+    print(f"  CER (Character Error Rate):  {cer_norm:.2f}%")
+    print(f"  WER (Word Error Rate):       {wer_norm:.2f}%")
+    print(f"  BLEU Score:                  {bleu_norm:.2f}")
+    print(f"\n📈 Improvement: CER {cer_raw - cer_norm:+.2f}%, WER {wer_raw - wer_norm:+.2f}%, BLEU {bleu_norm - bleu_raw:+.2f}")
+    
+    # Line matching (使用规范化后的版本)
+    ref_lines_norm = original_normalized.splitlines()
+    ocr_lines_norm = ocr_normalized.splitlines()
+    matches_norm = sum(1 for i in range(min(len(ref_lines_norm), len(ocr_lines_norm))) 
+                  if ref_lines_norm[i].strip() == ocr_lines_norm[i].strip())
+    emr_norm = matches_norm / max(len(ref_lines_norm), len(ocr_lines_norm)) * 100
+    print(f"\nExact Match Rate (normalized): {emr_norm:.2f}% ({matches_norm}/{max(len(ref_lines_norm), len(ocr_lines_norm))} lines)")
+    print("=" * 80)
+    
+    # Print detailed diff (使用规范化后的版本)
+    print("\n[Note: Showing diff after blank line normalization]")
+    print_diff_report(original_normalized, ocr_normalized)
+    
+    # Save outputs (保存原始和规范化后的版本)
+    output_ref_raw = f"compare_ref_{code_id}_ratio{ratio}_raw.txt"
+    output_ocr_raw = f"compare_ocr_{code_id}_ratio{ratio}_raw.txt"
+    output_ref_norm = f"compare_ref_{code_id}_ratio{ratio}_normalized.txt"
+    output_ocr_norm = f"compare_ocr_{code_id}_ratio{ratio}_normalized.txt"
+    
+    with open(output_ref_raw, 'w', encoding='utf-8') as f:
+        f.write(original_code)
+    with open(output_ocr_raw, 'w', encoding='utf-8') as f:
+        f.write(ocr_text)
+    with open(output_ref_norm, 'w', encoding='utf-8') as f:
+        f.write(original_normalized)
+    with open(output_ocr_norm, 'w', encoding='utf-8') as f:
+        f.write(ocr_normalized)
+    
+    print(f"\n💾 Saved:")
+    print(f"   Reference (raw):        {output_ref_raw}")
+    print(f"   OCR (raw):              {output_ocr_raw}")
+    print(f"   Reference (normalized): {output_ref_norm}")
+    print(f"   OCR (normalized):       {output_ocr_norm}")
+
+
 def main():
+    # 检查是否使用缓存模式
+    if len(sys.argv) >= 2 and sys.argv[1] == "--from-cache":
+        if len(sys.argv) >= 4:
+            code_id = sys.argv[2]
+            ratio = sys.argv[3]
+            main_from_cache(code_id, ratio)
+            return
+        else:
+            print("Usage: python ocr_and_compare.py --from-cache <code_id> <ratio>")
+            print("\nExample from dataset:")
+            print("  python ocr_and_compare.py --from-cache astrbot_plugin_lmarena_file_bed.py 1")
+            print("  python ocr_and_compare.py --from-cache astrbot_plugin_lmarena_file_bed.py 2")
+            sys.exit(1)
+    
     # 示例路径
     example_dir = r"D:\llm_projects\CodeZip\experiment_output\images\crypto-trader-bot-with-AI-algo_indicator_calculator.py\1024x1024_hl_nl"
     example_code_id = "crypto-trader-bot-with-AI-algo_indicator_calculator.py"
@@ -199,9 +492,9 @@ def main():
         text = ocr_image(img, api_key, max_retries=3)
         ocr_results.append(text)
     
-    # Merge
-    merged_ocr = '\n'.join(ocr_results)
-    print(f"\nMerged: {len(merged_ocr)} chars, {len(merged_ocr.splitlines())} lines")
+    # Merge (使用智能拼接)
+    merged_ocr = smart_join_pages(ocr_results)
+    print(f"\nMerged (smart join): {len(merged_ocr)} chars, {len(merged_ocr.splitlines())} lines")
     
     # Load original code - 使用绝对路径
     script_dir = os.path.dirname(os.path.abspath(__file__))

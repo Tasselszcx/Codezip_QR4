@@ -840,7 +840,7 @@ def run_module_4_judge(output_dir: str):
         taxonomy_labels = _detect_all_taxonomy_errors(reference, merged_ocr)
         detected_error_types = [k for k, v in taxonomy_labels.items() if v == 1]
 
-        # 记录详情
+        # 记录详情 
         detail_rec = {
             "code_id": code_id,
             "ratio": ratio,
