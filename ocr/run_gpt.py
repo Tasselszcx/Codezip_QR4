@@ -15,22 +15,22 @@ except Exception:
 
 # ================= 配置区 =================
 OUTPUT_DIR = "./experiment_output"
-IMAGES_DIR_DEFAULT = os.path.join(OUTPUT_DIR, "images_glm46v")  # 🌟 GLM-4.6V 专用目录
+IMAGES_DIR_DEFAULT = os.path.join(OUTPUT_DIR, "images_gpt52")  # 🌟 GPT-5.2 专用目录
 # 是否使用“已有图片集”直接 OCR + judge（用于跨模型公平对比）。
 # - USE_EXISTING_IMAGES=1：跳过模块1/2，不清理 images；直接用 EXISTING_IMAGES_DIR（或默认 IMAGES_DIR_DEFAULT）里的图片。
 # - DATASET_FILENAME：指定同一份 GT 数据集文件名（放在 OUTPUT_DIR 下），两种模型跑同一张表即可对比。
 USE_EXISTING_IMAGES = os.getenv("USE_EXISTING_IMAGES", "0").strip().lower() in ("1", "true", "yes", "y")
 EXISTING_IMAGES_DIR = os.getenv("EXISTING_IMAGES_DIR", "").strip()
 IMAGES_DIR = EXISTING_IMAGES_DIR or IMAGES_DIR_DEFAULT
-DEFAULT_DATASET_FILENAME = "dataset_glm46.json"
+DEFAULT_DATASET_FILENAME = "dataset_gpt52.json"
 DATASET_FILENAME = os.getenv("DATASET_FILENAME", DEFAULT_DATASET_FILENAME).strip() or DEFAULT_DATASET_FILENAME
 TARGET_RATIOS = [1, 2, 4, 8]  # 我们的压缩目标
 
 # ================= 模块三配置（Inference Engine）=================
-# 只跑 GLM-4.6V（通过 aihubmix OpenAI-compat 接口）
+# 使用 GPT-5.2（通过 aihubmix OpenAI-compat 接口）
 RUN_MODULE_3 = True
 AIHUBMIX_BASE_URL = "https://aihubmix.com/v1"
-GLM_MODEL_NAME = "glm-4.6v"
+GPT_MODEL_NAME = "gpt-5.2"  # 🌟 修改为 GPT 模型
 OCR_SYSTEM_PROMPT = "You are an OCR engine for code images."
 OCR_USER_PROMPT = (
     "Transcribe the code in this image exactly.\n"
@@ -181,7 +181,7 @@ def _clean_ocr_text(text: str) -> str:
     if not text:
         return ""
     cleaned = text
-    # GLM 视觉模型常见的包围标记
+    # 上游（含 GLM/部分中转）可能带的包围标记
     cleaned = cleaned.replace("<|begin_of_box|>", "").replace("<|end_of_box|>", "")
     return cleaned.strip("\n")
 
@@ -198,9 +198,9 @@ def _parse_ratio_from_filename(image_path: str) -> int:
     return 1
 
 
-def run_module_3_glm46v(images_dir: str, output_dir: str):
+def run_module_3_gpt52(images_dir: str, output_dir: str):
     print("\n" + "=" * 40)
-    print("🚀 Running Module 3: Inference Engine (GLM-4.6V)")
+    print("🚀 Running Module 3: Inference Engine (gpt-5.2)")
     print("=" * 40)
 
     if OpenAI is None:
@@ -231,7 +231,7 @@ def run_module_3_glm46v(images_dir: str, output_dir: str):
     print(f"🔑 AIHUBMIX_API_KEY loaded ({api_key_source}): {_mask_api_key(api_key)}")
 
     os.makedirs(output_dir, exist_ok=True)
-    out_jsonl = os.path.join(output_dir, "glm46v_ocr.jsonl")
+    out_jsonl = os.path.join(output_dir, "gpt52_ocr.jsonl")  # 🌟 修改输出文件名
     done = _load_done_set(out_jsonl)
 
     client = OpenAI(api_key=api_key, base_url=AIHUBMIX_BASE_URL)
@@ -265,9 +265,9 @@ def run_module_3_glm46v(images_dir: str, output_dir: str):
             for attempt in range(1, OCR_MAX_RETRIES + 1):
                 try:
                     resp = client.chat.completions.create(
-                        model=GLM_MODEL_NAME,
+                        model=GPT_MODEL_NAME,  # 🌟 使用 GPT 模型
                         temperature=OCR_TEMPERATURE,
-                        max_tokens=OCR_MAX_TOKENS,
+                        max_completion_tokens=OCR_MAX_TOKENS,
                         messages=[
                             {"role": "system", "content": OCR_SYSTEM_PROMPT},
                             {
@@ -292,7 +292,7 @@ def run_module_3_glm46v(images_dir: str, output_dir: str):
                 "code_id": code_id,
                 "ratio": ratio,
                 "image_path": image_path,
-                "model": GLM_MODEL_NAME,
+                "model": GPT_MODEL_NAME,  # 🌟 记录模型名称
             }
 
             if last_err is None:
@@ -360,9 +360,9 @@ def run_module_3_glm46v(images_dir: str, output_dir: str):
                 try:
                     _rate_limit_wait()
                     resp = _get_client().chat.completions.create(
-                        model=GLM_MODEL_NAME,
+                        model=GPT_MODEL_NAME,
                         temperature=OCR_TEMPERATURE,
-                        max_tokens=OCR_MAX_TOKENS,
+                        max_completion_tokens=OCR_MAX_TOKENS,
                         messages=[
                             {"role": "system", "content": OCR_SYSTEM_PROMPT},
                             {
@@ -386,7 +386,7 @@ def run_module_3_glm46v(images_dir: str, output_dir: str):
                 "code_id": code_id,
                 "ratio": ratio,
                 "image_path": image_path,
-                "model": GLM_MODEL_NAME,
+                "model": GPT_MODEL_NAME,
             }
             if last_err is None:
                 rec["text"] = text
@@ -408,7 +408,7 @@ def run_module_3_glm46v(images_dir: str, output_dir: str):
                         "code_id": "",
                         "ratio": _parse_ratio_from_filename(image_path),
                         "image_path": image_path,
-                        "model": GLM_MODEL_NAME,
+                        "model": GPT_MODEL_NAME,
                         "error": f"worker_exception: {e}",
                     }
                     ok = False
@@ -1185,27 +1185,27 @@ def apply_visual_corruption(image_path, ratio):
             name_part, ext = os.path.splitext(base_name)
             new_filename = f"{name_part}_ratio{ratio}{ext}"
             new_path = os.path.join(dir_name, new_filename)
-
-            # ratio=1: 不做压缩，只保存一份带后缀的副本
+            
             if ratio == 1:
+                # ratio=1: 直接保存原图（不压缩），但重命名为 _ratio1
                 img.save(new_path)
                 return new_path
-
-            # 计算新尺寸
+            
+            # ratio>1: 执行压缩处理
             original_w, original_h = img.size
             new_w = max(1, int(original_w / ratio))
             new_h = max(1, int(original_h / ratio))
             
             # 执行压缩 (Downsampling) -> 再 Upsampling 回原尺寸
-            # 这样可以保持尺寸一致，同时通过信息丢失制造“变糊”效果
             small_img = img.resize((new_w, new_h), Image.Resampling.BILINEAR)
             resized_img = small_img.resize((original_w, original_h), Image.Resampling.BILINEAR)
-            
             resized_img.save(new_path)
             return new_path
+            
     except Exception as e:
         print(f"   ⚠️ Compression failed for ratio {ratio}: {e}")
         return None
+
 
 def run_full_process():
     os.makedirs(OUTPUT_DIR, exist_ok=True)  # 确保输出目录存在
@@ -1230,18 +1230,18 @@ def run_full_process():
                 print(f"⚠️ Failed to clean {IMAGES_DIR}: {e}")
 
     # 🧹 清理当前模型上次运行残留的输出文件（避免 done-set 跳过 + 评估结果混淆）
-    glm_ocr_jsonl = os.path.join(OUTPUT_DIR, "glm46v_ocr.jsonl")
-    glm_model_tag = _safe_filename_component(GLM_MODEL_NAME)
-    glm_dataset_json = os.path.join(OUTPUT_DIR, DEFAULT_DATASET_FILENAME)
+    gpt52_ocr_jsonl = os.path.join(OUTPUT_DIR, "gpt52_ocr.jsonl")
+    gpt52_model_tag = _safe_filename_component(GPT_MODEL_NAME)
+    gpt52_dataset_json = os.path.join(OUTPUT_DIR, DEFAULT_DATASET_FILENAME)
     legacy_dataset_json = os.path.join(OUTPUT_DIR, "dataset.json")
-    glm_judge_detail = os.path.join(OUTPUT_DIR, f"judge_results_detail_{glm_model_tag}.jsonl")
-    glm_judge_summary = os.path.join(OUTPUT_DIR, f"judge_summary_{glm_model_tag}.json")
+    gpt52_judge_detail = os.path.join(OUTPUT_DIR, f"judge_results_detail_{gpt52_model_tag}.jsonl")
+    gpt52_judge_summary = os.path.join(OUTPUT_DIR, f"judge_summary_{gpt52_model_tag}.json")
     removed = []
     # 使用已有图片集时：不要删除 dataset（否则 judge 没有 GT）。
     # 走全流程时：会重建 dataset，因此可安全清理掉旧的 dataset 及 legacy dataset.json。
-    to_remove = [glm_ocr_jsonl, glm_judge_detail, glm_judge_summary]
+    to_remove = [gpt52_ocr_jsonl, gpt52_judge_detail, gpt52_judge_summary]
     if not USE_EXISTING_IMAGES:
-        to_remove.extend([glm_dataset_json, legacy_dataset_json])
+        to_remove.extend([gpt52_dataset_json, legacy_dataset_json])
 
     for p in to_remove:
         if _remove_file_if_exists(p):
@@ -1355,16 +1355,17 @@ def run_full_process():
         print("="*40)
 
     # -------------------------------------------------
-    # 🟣 模块三: 推理引擎 (Inference Engine) - GLM-4.6V
+    # 🟣 模块三: 推理引擎 (Inference Engine) - gpt-5.2
     # -------------------------------------------------
     if RUN_MODULE_3:
-        run_module_3_glm46v(IMAGES_DIR, OUTPUT_DIR)
+        run_module_3_gpt52(IMAGES_DIR, OUTPUT_DIR)
 
     # -------------------------------------------------
     # 🟠 模块四: 自动评估器 (Auto-Judge)
     # -------------------------------------------------
     if RUN_MODULE_4:
-        run_module_4_judge(OUTPUT_DIR, "glm46v_ocr.jsonl", GLM_MODEL_NAME, dataset_filename)
+        run_module_4_judge(OUTPUT_DIR, "gpt52_ocr.jsonl", GPT_MODEL_NAME, dataset_filename)
+
 
 if __name__ == "__main__":
     run_full_process()
