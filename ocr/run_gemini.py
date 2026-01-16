@@ -42,6 +42,9 @@ GEMINI_MODEL_NAME = "gemini-3-flash-preview"  # 🌟 修改为 Gemini 模型
 OCR_SYSTEM_PROMPT = "You are an OCR engine for code images."
 OCR_USER_PROMPT = (
     "Transcribe the code in this image exactly.\n"
+    "- This code file may be split across multiple images (pages) in order; this image is one page of the same file.\n"
+    "- The page may start mid-block (e.g., indented lines without a visible 'def' header). Keep the indentation exactly as shown.\n"
+    "- Do NOT invent missing context. Do NOT add wrapper code such as 'def', 'class', imports, or any extra lines.\n"
     "- Output plain text only (no Markdown, no code fences).\n"
     "- Preserve all whitespace, indentation, and newlines.\n"
     "- Do not add, remove, or rename anything.\n"
@@ -1204,6 +1207,21 @@ def run_module_4_judge(
         # 计算每种错误类型的检出率
         error_rates = {et: round(cnt / s["count"], 4) 
                       for et, cnt in s["errors"].items()}
+
+        # 8类错误 -> 3大类聚合统计
+        error_groups = {
+            "Recognition": ["Visual_Typo", "Symbol_Loss", "Comment_Loss"],
+            "Structure": ["Indentation_Error", "Line_Skipped", "Repetition"],
+            "Hallucination": ["Variable_Hallucination", "Code_Invention"],
+        }
+        error_group_counts = {
+            group: int(sum(s["errors"].get(k, 0) for k in members))
+            for group, members in error_groups.items()
+        }
+        error_group_rates = {
+            group: round(cnt / s["count"], 4)
+            for group, cnt in error_group_counts.items()
+        }
         summary[f"ratio_{ratio}x"] = {
             "count": s["count"],
             "avg_cer": round(s["cer_sum"] / s["count"], 4),
@@ -1219,6 +1237,8 @@ def run_module_4_judge(
             "avg_codediff_diff_hunks_no_blank": round(s["codediff_hunks_sum"] / s["count"], 4),
             "error_counts": dict(s["errors"]),  # 原始计数
             "error_rates": error_rates,  # 检出率
+            "error_group_counts": error_group_counts,
+            "error_group_rates": error_group_rates,
         }
 
     with open(summary_path, "w", encoding="utf-8") as f:
@@ -1244,6 +1264,22 @@ def run_module_4_judge(
                 f"change_rate={data.get('avg_codediff_change_rate_no_blank', 0.0):.4f}, "
                 f"hunks={data.get('avg_codediff_diff_hunks_no_blank', 0.0):.2f}, "
                 f"replaced={data.get('avg_codediff_replaced_lines_no_blank', 0.0):.2f}"
+            )
+        if "error_group_counts" in data:
+            egc = data.get("error_group_counts") or {}
+            print(
+                "      ├─ ErrorGroups(count): "
+                f"Recognition={egc.get('Recognition', 0)}, "
+                f"Structure={egc.get('Structure', 0)}, "
+                f"Hallucination={egc.get('Hallucination', 0)}"
+            )
+        if "error_group_rates" in data:
+            egr = data.get("error_group_rates") or {}
+            print(
+                "      ├─ ErrorGroups(rate): "
+                f"Recognition={float(egr.get('Recognition', 0.0)):.2%}, "
+                f"Structure={float(egr.get('Structure', 0.0)):.2%}, "
+                f"Hallucination={float(egr.get('Hallucination', 0.0)):.2%}"
             )
         if data['error_counts']:
             err_str = ", ".join([f"{k}:{v}" for k, v in data['error_counts'].items()])
