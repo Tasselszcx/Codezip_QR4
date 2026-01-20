@@ -49,7 +49,45 @@ OCR_USER_PROMPT = (
     "- Preserve all whitespace, indentation, and newlines.\n"
     "- Do not add, remove, or rename anything.\n"
 )
-OCR_MAX_TOKENS = 4096
+
+# Gemini Safety Settings（默认关闭，以避免改变原有行为；需要时通过环境变量开启）
+# 说明：不同 OpenAI-compat 中转对该字段支持不一，开启后若报参数错误，可关闭该开关。
+GEMINI_ENABLE_SAFETY_SETTINGS = _env_bool("GEMINI_ENABLE_SAFETY_SETTINGS", False)
+GEMINI_SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
+# Prompt 可选增强/覆盖（默认不启用，以避免改变原有行为）
+OCR_PROMPT_PERSONAL_OFFLINE = _env_bool("OCR_PROMPT_PERSONAL_OFFLINE", False)
+OCR_USER_PROMPT_OVERRIDE = os.getenv("OCR_USER_PROMPT_OVERRIDE", "").strip()
+
+
+def _get_ocr_user_prompt() -> str:
+    """获取 OCR user prompt。
+
+    优先级：
+    1) OCR_USER_PROMPT_OVERRIDE（完全覆盖）
+    2) OCR_PROMPT_PERSONAL_OFFLINE=1（在不改变约束的情况下，增加用途说明）
+    3) 默认 OCR_USER_PROMPT
+    """
+    if OCR_USER_PROMPT_OVERRIDE:
+        return OCR_USER_PROMPT_OVERRIDE
+    if OCR_PROMPT_PERSONAL_OFFLINE:
+        return (
+            "Transcribe the code in these images exactly as it appears. "
+            "This is for a personal offline syntax check project.\n"
+            "- These images are consecutive pages of the SAME code file, in order.\n"
+            "- The page may start mid-block (e.g., indented lines without a visible 'def' header). Keep the indentation exactly as shown.\n"
+            "- Do NOT invent missing context. Do NOT add wrapper code such as 'def', 'class', imports, or any extra lines.\n"
+            "- Output plain text only (no Markdown, no code fences).\n"
+            "- Preserve all whitespace, indentation, and newlines.\n"
+            "- Do not add, remove, or rename anything.\n"
+        )
+    return OCR_USER_PROMPT
+OCR_MAX_TOKENS = 16384  # Gemini 支持更大上下文，这里设置为较大值
 OCR_TEMPERATURE = 0.0
 OCR_SLEEP_SECONDS = 0.2
 OCR_MAX_RETRIES = 5
@@ -199,6 +237,59 @@ def _clean_ocr_text(text: str) -> str:
     return cleaned.strip("\n")
 
 
+def _extract_response_diagnostics(resp) -> dict:
+    """从 OpenAI-compat 响应对象中尽量提取可用于排障的字段。
+
+    注意：不同中转/SDK 版本字段形状可能不同；这里尽量容错，不影响原有流程。
+    """
+    diag: dict = {}
+    try:
+        resp_id = getattr(resp, "id", None)
+        if resp_id:
+            diag["response_id"] = resp_id
+    except Exception:
+        pass
+
+    try:
+        model = getattr(resp, "model", None)
+        if model:
+            diag["response_model"] = model
+    except Exception:
+        pass
+
+    finish_reason = None
+    try:
+        if getattr(resp, "choices", None) and len(resp.choices) > 0:
+            finish_reason = getattr(resp.choices[0], "finish_reason", None)
+    except Exception:
+        finish_reason = None
+    if finish_reason is not None:
+        diag["finish_reason"] = finish_reason
+
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            # usage 可能是对象或 dict
+            if hasattr(usage, "model_dump"):
+                diag["usage"] = usage.model_dump()
+            elif isinstance(usage, dict):
+                diag["usage"] = usage
+    except Exception:
+        pass
+
+    # 某些实现可能提供 refusal / safety 信息（尽量抓取，不做强依赖）
+    try:
+        if getattr(resp, "choices", None) and len(resp.choices) > 0:
+            msg = getattr(resp.choices[0], "message", None)
+            refusal = getattr(msg, "refusal", None) if msg is not None else None
+            if refusal:
+                diag["refusal"] = refusal
+    except Exception:
+        pass
+
+    return diag
+
+
 def _parse_ratio_from_filename(image_path: str) -> int:
     # e.g. page_001_ratio2.png -> 2 ; page_001.png -> 1
     stem = os.path.splitext(os.path.basename(image_path))[0]
@@ -295,16 +386,18 @@ def run_module_3_gemini(images_dir: str, output_dir: str):
                 f"[{i}/{len(cases)}] OCR(single-turn): {code_id} @ ratio {ratio}x ({len(page_paths)} pages)"
             )
 
-            content = [{"type": "text", "text": OCR_USER_PROMPT}]
+            content = [{"type": "text", "text": _get_ocr_user_prompt()}]
             for p in page_paths:
                 data_url = _encode_image_to_data_url(p)
                 content.append({"type": "image_url", "image_url": {"url": data_url}})
 
             last_err = None
             text = ""
+            diagnostics = {}
 
             for attempt in range(1, OCR_MAX_RETRIES + 1):
                 try:
+                    extra_body = {"safety_settings": GEMINI_SAFETY_SETTINGS} if GEMINI_ENABLE_SAFETY_SETTINGS else None
                     resp = client.chat.completions.create(
                         model=GEMINI_MODEL_NAME,  # 🌟 使用 Gemini 模型
                         temperature=OCR_TEMPERATURE,
@@ -316,8 +409,10 @@ def run_module_3_gemini(images_dir: str, output_dir: str):
                                 "content": content,
                             },
                         ],
+                        extra_body=extra_body,
                     )
                     text = _clean_ocr_text(resp.choices[0].message.content or "")
+                    diagnostics = _extract_response_diagnostics(resp)
                     last_err = None
                     break
                 except Exception as e:
@@ -335,8 +430,14 @@ def run_module_3_gemini(images_dir: str, output_dir: str):
                 "model": GEMINI_MODEL_NAME,  # 🌟 记录模型名称
             }
 
+            if diagnostics:
+                rec.update(diagnostics)
+
             if last_err is None:
                 rec["text"] = text
+                rec["text_len"] = len(text)
+                if rec.get("finish_reason") in ("content_filter", "safety"):
+                    rec["blocked_by_safety"] = True
                 total += 1
             else:
                 rec["error"] = last_err
@@ -387,17 +488,19 @@ def run_module_3_gemini(images_dir: str, output_dir: str):
                 time.sleep(wait_s)
 
         def _ocr_one_case(code_id: str, ratio: int, page_paths: list[str]):
-            content = [{"type": "text", "text": OCR_USER_PROMPT}]
+            content = [{"type": "text", "text": _get_ocr_user_prompt()}]
             for p in page_paths:
                 data_url = _encode_image_to_data_url(p)
                 content.append({"type": "image_url", "image_url": {"url": data_url}})
 
             last_err = None
             text = ""
+            diagnostics = {}
 
             for attempt in range(1, OCR_MAX_RETRIES + 1):
                 try:
                     _rate_limit_wait()
+                    extra_body = {"safety_settings": GEMINI_SAFETY_SETTINGS} if GEMINI_ENABLE_SAFETY_SETTINGS else None
                     resp = _get_client().chat.completions.create(
                         model=GEMINI_MODEL_NAME,
                         temperature=OCR_TEMPERATURE,
@@ -409,8 +512,10 @@ def run_module_3_gemini(images_dir: str, output_dir: str):
                                 "content": content,
                             },
                         ],
+                        extra_body=extra_body,
                     )
                     text = _clean_ocr_text(resp.choices[0].message.content or "")
+                    diagnostics = _extract_response_diagnostics(resp)
                     last_err = None
                     break
                 except Exception as e:
@@ -426,8 +531,13 @@ def run_module_3_gemini(images_dir: str, output_dir: str):
                 "image_path": page_paths[0] if page_paths else "",
                 "model": GEMINI_MODEL_NAME,
             }
+            if diagnostics:
+                rec.update(diagnostics)
             if last_err is None:
                 rec["text"] = text
+                rec["text_len"] = len(text)
+                if rec.get("finish_reason") in ("content_filter", "safety"):
+                    rec["blocked_by_safety"] = True
                 return rec, True
             rec["error"] = last_err
             return rec, False
