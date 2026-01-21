@@ -25,7 +25,7 @@ EXISTING_IMAGES_DIR = os.getenv("EXISTING_IMAGES_DIR", "").strip()
 IMAGES_DIR = EXISTING_IMAGES_DIR or IMAGES_DIR_DEFAULT
 DEFAULT_DATASET_FILENAME = "dataset_gemini.json"
 DATASET_FILENAME = os.getenv("DATASET_FILENAME", DEFAULT_DATASET_FILENAME).strip() or DEFAULT_DATASET_FILENAME
-TARGET_RATIOS = [1, 2, 4, 6, 8]  # 我们的压缩目标
+TARGET_RATIOS = [1, 1.5, 2, 4, 6, 8]  # 我们的压缩目标
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -290,13 +290,16 @@ def _extract_response_diagnostics(resp) -> dict:
     return diag
 
 
-def _parse_ratio_from_filename(image_path: str) -> int:
-    # e.g. page_001_ratio2.png -> 2 ; page_001.png -> 1
+def _parse_ratio_from_filename(image_path: str):
+    # e.g. page_001_ratio2.png -> 2 ; page_001_ratio1.5.png -> 1.5 ; page_001.png -> 1
     stem = os.path.splitext(os.path.basename(image_path))[0]
     marker = "_ratio"
     if marker in stem:
         try:
-            return int(stem.split(marker, 1)[1])
+            tail = stem.split(marker, 1)[1].strip().replace("_", ".")
+            if "." in tail:
+                return float(tail)
+            return int(tail)
         except Exception:
             return 1
     return 1
@@ -1449,7 +1452,7 @@ def run_module_4_judge(
 def apply_visual_corruption(image_path, ratio):
     """
     手动实现视觉干扰器：读取原图，先按比例缩小再放大回原尺寸（保持尺寸一致）
-    约定：无论 ratio 是 1/2/4/6/8，都生成一个带 _ratio{ratio} 后缀的新文件。
+    约定：无论 ratio 是 1/1.5/2/4/6/8，都生成一个带 _ratio{ratio} 后缀的新文件。
     """
     try:
         with Image.open(image_path) as img:
