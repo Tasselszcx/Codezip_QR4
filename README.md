@@ -10,7 +10,7 @@
 # 1. 核心开关：使用已有图片，跳过数据挖掘和图片生成
 $env:USE_EXISTING_IMAGES="1"
 
-# 2. 指定已有图片的路径 (请根据实际情况调整相对路径)
+# 2. 指定已有图片的路径
 $env:EXISTING_IMAGES_DIR=".\experiment_output\images_glm46v"
 
 # 3. 指定对应的 Ground Truth 数据集文件 (位于 experiment_output 下)
