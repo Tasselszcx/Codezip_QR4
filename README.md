@@ -1,6 +1,6 @@
 ## 1. API Key 配置
 
-脚本默认从环境变量或 `.env` 文件中读取 `AIHUBMIX_API_KEY`，可以让AI帮忙改一下api_key的调用，在`.env`文件中同步更改一下。
+脚本默认从环境变量或 `.env` 文件中读取 `AIHUBMIX_API_KEY`，可以让AI帮忙改一下api_key的调用，将项目根目录下的 `.env copy` 重命名为 `.env`，在`.env`文件中同步更改一下。
 
 ## 2. 打开一个powershell窗口，配置环境变量如下（直接复制粘贴进去）
 
@@ -10,7 +10,7 @@
 # 1. 核心开关：使用已有图片，跳过数据挖掘和图片生成
 $env:USE_EXISTING_IMAGES="1"
 
-# 2. 指定已有图片的路径 (请根据实际情况调整相对路径)
+# 2. 指定已有图片的路径
 $env:EXISTING_IMAGES_DIR=".\experiment_output\images_glm46v"
 
 # 3. 指定对应的 Ground Truth 数据集文件 (位于 experiment_output 下)
