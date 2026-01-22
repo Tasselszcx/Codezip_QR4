@@ -29,7 +29,7 @@ $env:OCR_PARALLEL_MIN_INTERVAL_SECONDS="0"
 # 开启安全设置透传 (防止图片被误判为有害而被拦截)
 $env:GEMINI_ENABLE_SAFETY_SETTINGS="1"
 # 开启 Prompt 增强 (声明用于个人离线测试，降低拒答率)
-$env:OCR_PROMPT_PERSONAL_OFFLINE="1"
+$env:OCR_PROMPT_PERSONAL_OFFLINE="1" 
 ```
 
 ### Mac/Linux版本：
