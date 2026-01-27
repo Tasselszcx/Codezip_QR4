@@ -25,7 +25,7 @@ EXISTING_IMAGES_DIR = os.getenv("EXISTING_IMAGES_DIR", "").strip()
 IMAGES_DIR = EXISTING_IMAGES_DIR or IMAGES_DIR_DEFAULT
 DEFAULT_DATASET_FILENAME = "dataset_gemini.json"
 DATASET_FILENAME = os.getenv("DATASET_FILENAME", DEFAULT_DATASET_FILENAME).strip() or DEFAULT_DATASET_FILENAME
-TARGET_RATIOS = [1, 1.5, 2, 4, 6, 8]  # 我们的压缩目标
+TARGET_RATIOS = [1, 1.5, 2, 4, 6, 8, 16]  # 我们的压缩目标
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -38,7 +38,7 @@ def _env_bool(name: str, default: bool) -> bool:
 # 使用 Gemini（通过 aihubmix OpenAI-compat 接口）
 RUN_MODULE_3 = _env_bool("RUN_MODULE_3", True)
 AIHUBMIX_BASE_URL = "https://aihubmix.com/v1"
-GEMINI_MODEL_NAME = "gemini-3-pro-preview"  # 🌟 修改为 Gemini 模型
+GEMINI_MODEL_NAME = "gemini-3-flash-preview"  # 🌟 修改为 Gemini 模型
 OCR_SYSTEM_PROMPT = "You are an OCR engine for code images."
 OCR_USER_PROMPT = (
     "Transcribe the code in these images exactly.\n"
@@ -1648,3 +1648,4 @@ def run_full_process():
 
 if __name__ == "__main__":
     run_full_process()
+
